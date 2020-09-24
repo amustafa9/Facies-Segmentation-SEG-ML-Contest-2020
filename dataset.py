@@ -1,6 +1,7 @@
 # File defines the dataset classes used to load seismic patches
 
 # import statements
+import numpy as np
 import torch
 import torchvision
 import torch.nn as nn
@@ -8,6 +9,7 @@ import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader
 
+from utils import image_crop
 
 class SeismicPatch(Dataset):
     """Dataset class for loading F3 patches and labels"""
