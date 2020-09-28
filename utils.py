@@ -6,6 +6,10 @@ import torchvision
 import torch.nn as nn
 import torch.nn.functional as F
 from mayavi import mlab
+from scipy import interpolate
+
+import segyio
+
 
 def image_crop(Im, height, width):
     """Generate 10 different versions of image crops of a given seismic section
@@ -46,7 +50,6 @@ def image_crop(Im, height, width):
     images = im_list + im_list_flipped
 
     return images
-
 
 
 def section_predict(model, section, patch_length):
@@ -183,7 +186,8 @@ def create_3d_visualization(scalars, pos):
     """
 
     # check that slice positions are within range of the volume dimensions
-    assert all([pos[i] < scalars.shape[i] for i in range(len(pos))])==True,"Please enter positions within volume dimensions!"
+    assert all([pos[i] < scalars.shape[i] for i in
+                range(len(pos))]) == True, "Please enter positions within volume dimensions!"
 
     fig = mlab.figure(figure='labels', bgcolor=(1, 1, 1), fgcolor=(0, 0, 0))
     mlab.volume_slice(scalars, slice_index=0, plane_orientation='x_axes', figure=fig)
@@ -193,3 +197,99 @@ def create_3d_visualization(scalars, pos):
     mlab.axes(xlabel='Inline', ylabel='Crossline', zlabel='Depth', nb_labels=10)
     mlab.show()
 
+
+def prepare_labels_for_upload(labels):
+    """Function upsamples label volume and brings labels to range [1,6] for upload to SEG"""
+
+    # Upsample label volume to full depth resolution of 1006
+    depth = np.arange(1005)  # original depth axis
+    depth_used = np.arange(1005)[::2]  # depth axis used
+
+    # obtain the interpolation function
+    f = interpolate.interp1d(depth_used, labels, axis=-1)
+
+    # upsample the labels
+    upsampled_labels = f(depth)
+    upsampled_labels = np.concatenate((upsampled_labels, upsampled_labels[:, :, -1][:, :, None]), axis=-1)
+    upsampled_labels += 1
+
+    return upsampled_labels.astype('uint8')
+
+
+def numpy2segy(data, filename):
+    """function converts the given 3D numpy array (xlines,ilines,depth) into a segy file"""
+
+    # retrieve cube dimesions
+    xlines, ilines, depth = data.shape
+
+    # create a segyi spec structure with the appropriate header information
+    spec = segyio.spec()
+    spec.sorting = 2
+    spec.format = 1
+    spec.samples = range(depth)
+    spec.ilines = range(ilines)
+    spec.xlines = range(xlines)
+
+    # create the segy file
+    with segyio.create(filename, spec) as f:
+        # Write the file trace-by-trace and update headers with iline, xline
+        # and offset
+        tr = 0
+        for il in spec.ilines:
+            for xl in spec.xlines:
+                f.header[tr] = {
+                    segyio.su.offset: 1,
+                    segyio.su.iline: il,
+                    segyio.su.xline: xl
+                }
+                f.trace[tr] = data[xl, il]
+                tr += 1
+
+        f.bin.update(
+            tsort=segyio.TraceSortingFormat.INLINE_SORTING
+        )
+
+    return f
+
+
+def numpy2segyFromSource(data, dst_filename, src_filename):
+    """function converts the given 3D numpy array (xlines,ilines,depth) into a segy file with header information
+    identcal to a given source segy file"""
+
+    # retrieve cube dimesions
+    xlines, ilines, depth = data.shape
+
+    # create a segyi spec structure with the appropriate header information
+    with segyio.open(src_filename) as src:
+        spec = segyio.spec()
+        spec.sorting = int(src.sorting)
+        spec.format = int(src.format)
+        spec.samples = range(depth)
+        spec.ilines = src.ilines
+        spec.xlines = src.xlines
+
+        with segyio.create(dst_filename, spec) as dst:
+            # Copy all textual headers, including possible extended
+            for i in range(src.ext_headers):
+                dst.text[i] = src.text[i]
+
+            # Copy the binary header, then insert the modifications needed for the new time axis
+            dst.bin = src.bin
+            dst.bin = {segyio.BinField.Samples: depth}
+
+            # Copy all trace headers to destination file
+            dst.header.iline = src.header.iline
+
+            # Modify headers to have IL and XL at more standard bytes
+            tr = 0
+            for il in spec.ilines:
+                for xl in spec.xlines:
+                    dst.header[tr] = {
+                        segyio.tracefield.TraceField.INLINE_3D: il,
+                        segyio.tracefield.TraceField.CROSSLINE_3D: xl,
+                        segyio.TraceField.TRACE_SAMPLE_COUNT: depth}
+
+                    tr += 1
+
+            for iil, iline in enumerate(dst.ilines):
+                dst.iline[iline] = data[iil].astype(int)
